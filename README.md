@@ -20,7 +20,7 @@ Course Project for Advanced Econometrics II
 |---------|--------|-----------|--------|-------------|
 | **EUR/GBP Exchange Rate** | European Central Bank | Daily | Jan 1999 - May 2025 | Monthly averages computed from daily spot rates |
 | **Portugal Consumer Price Index (CPI)** | Instituto Nacional de Estatística (INE) | Monthly | Jan 1999 - May 2025 | Base - 2012 |
-| **UK Consumer Price Index (CPI)** | Office for National Statistics (ONS) | Monthly | Jan 1999 - May 2025 | Base - 2012 |
+| **UK Consumer Price Index (CPI)** | Office for National Statistics (ONS) | Monthly | Jan 1999 - May 2025 | Base - 2015 |
 
 ### Derived Variables
 1. **Log Exchange Rate**: `log(euro_per_gbp)`
