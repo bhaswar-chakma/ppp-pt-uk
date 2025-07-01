@@ -1,0 +1,373 @@
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(urca)
+library(strucchange)
+library(car)
+library(readxl)
+library(readr)
+
+# 1. Data Processing------------------------------------------------------------
+
+## Exchange Rate Euro to GB====
+# Source: ECB
+
+df_fx <- read_csv("data/eurofxref-hist.csv") |> 
+  select(Date, GBP) |> 
+  mutate(
+    year = year(Date),
+    month = month(Date, label = TRUE)
+  ) |> 
+  # find monthly average
+  group_by(year, month) |> 
+  summarize(
+    gbp_per_euro = mean(GBP)
+  ) |> 
+  ungroup() |> 
+  mutate(
+    euro_per_gbp = 1/gbp_per_euro
+  ) |> 
+  # Create Date: day 28 of each month for joining
+  mutate(
+    date = ymd(paste(year, month, "28"))
+  ) |> 
+  filter(date >= ymd("19990101")) |> 
+  select(date, euro_per_gbp)
+
+
+
+## PT CPI ====
+# Source: INE
+
+df_pt <- read_excel("data/PT-CPI.xls", skip = 11) |>
+  rename(
+    month = 1,
+    cpi_pt = 2
+  ) |> 
+  select(month, cpi_pt) |> 
+  drop_na() |> 
+  # Create Date 28 of each month for joining
+  mutate(
+    date = myd(paste(month, "28"))
+  ) |> 
+  filter(date >= ymd("19990101")) |> 
+  select(date, cpi_pt)
+
+## UK CPI====
+# Source: https://www.ons.gov.uk/economy/inflationandpriceindices
+
+df_uk <- read_excel(
+  "data/UK-CPI.xls", 
+  skip =  325 # Consider only from 01 Jan 1999
+) |> 
+  rename(
+    month = 1,
+    cpi_uk = 2
+  ) |> 
+  # Create Date 28 of each month for joining
+  mutate(
+    date = ymd(paste(month, "28"))
+  ) |> 
+  select(date, cpi_uk)
+
+## Join and generate log vars====
+df_clean <- inner_join(df_uk, df_pt) |> 
+  inner_join(df_fx) |> 
+  # Log transformations
+  mutate(
+    log_exchange_rate = log(euro_per_gbp), # s_t
+    log_cpi_pt  = log(cpi_pt), # p_t (home)
+    log_cpi_uk = log(cpi_uk), # p*_t (foreign),
+    # price ratio: p_t - p*_t
+    log_price_ratio = log_cpi_pt - log_cpi_uk,
+    # real exchange rate: s_t - (p_t - p*_t) 
+    log_real_exchange_rate = log_exchange_rate - log_price_ratio
+  ) |> 
+  # Now make date last date of each month
+  mutate(date = ceiling_date(date, "month") - days(1)) |> 
+  arrange(date)
+
+# 2 Plot the series-------------------------------------------------------------
+vars_wanted <- c(
+  "log_exchange_rate", "log_cpi_pt", "log_cpi_uk", 
+  "log_real_exchange_rate"
+)
+
+p1 <- df_clean |> 
+  select(date, all_of(vars_wanted)) |> 
+  rename(
+    "Log Exchange Rate (GBP/EUR)" = log_exchange_rate,
+    "Log CPI Portugal" = log_cpi_pt,
+    "Log CPI UK" = log_cpi_uk,
+    "Log Real Exchange Rate" = log_real_exchange_rate
+  ) |> 
+  pivot_longer(
+    cols = - date,
+    names_to = "var",
+    values_to = "value"
+  ) |> 
+  ggplot(aes(x = date, y = value)) +
+  geom_line() +
+  facet_wrap(~ var, scale = "free") +
+  labs(
+    y = "", x = "",
+    title = "Log CPI and Exchange Rate"
+  )
+
+# Save as high-quality PNG
+ggsave("p1.png", plot = p1, width = 8, height = 6, dpi = 300, units = "in")
+
+
+# 3. Unit Root Test-------------------------------------------------------------
+
+## CPI ====
+table_unit_root_cpi <- NULL
+for (i in 1:13) {
+  table_unit_root_cpi <- rbind(
+    table_unit_root_cpi,
+    c(
+      ur.df(
+        df_clean$log_cpi_pt, lag = i-1, type = "trend"
+      )@testreg$coefficients[2,3], 
+      ur.df(
+        df_clean$log_cpi_uk, lag = i-1, type = "trend"
+      )@testreg$coefficients[2,3]
+    )
+  )
+}
+rownames(table_unit_root_cpi) <- paste0("ADF(", 0:12, ")")  
+colnames(table_unit_root_cpi) <- c("Portugal (p_t)", "UK (p_t*)")
+table_unit_root_cpi
+
+
+## FX ====
+table_unit_root_fx <- NULL
+for (i in 1:7) {
+  table_unit_root_fx <- rbind(
+    table_unit_root_fx,
+    c(
+      ur.df(
+        df_clean$log_exchange_rate, lag = i-1, type = "drift"
+      )@testreg$coefficients[2,3],                       
+      ur.df(
+        df_clean$log_exchange_rate, lag = i-1, type = "trend"
+      )@testreg$coefficients[2,3]
+    )
+  )
+}
+rownames(table_unit_root_fx) <- paste0("ADF(", 0:6, ")")  
+colnames(table_unit_root_fx) <- c("Without Trend", "With Trend")
+table_unit_root_fx 
+
+## FX Real====
+table_unit_root_fx_real <- NULL
+for (i in c(1:7, 13)) {
+  table_unit_root_fx_real <- rbind(
+    table_unit_root_fx_real,
+    c(
+      ur.df(
+        df_clean$log_real_exchange_rate, lag = i-1, type = "drift"
+      )@testreg$coefficients[2,3],
+      ur.df(
+        df_clean$log_real_exchange_rate, lag = i-1, type = "trend"
+      )@testreg$coefficients[2,3]
+    )
+  )
+}
+rownames(table_unit_root_fx_real) <- paste0("ADF(", c(0:6, 12), ")")  
+colnames(table_unit_root_fx_real) <- c("Without Trend", "With Trend")
+table_unit_root_fx_real
+
+
+
+## Log Price Ratio====  
+table_unit_root_log_price_ratio <- NULL
+for (i in c(1:7, 13, 25, 37)) {
+  table_unit_root_log_price_ratio <- rbind(
+    table_unit_root_log_price_ratio,
+    c(
+      ur.df(
+        df_clean$log_price_ratio, lag = i-1, type = "drift"
+      )@testreg$coefficients[2, 3], 
+      ur.df(
+        df_clean$log_price_ratio, lag = i-1, type = "trend"
+      )@testreg$coefficients[2, 3]
+    )
+  )
+}
+rownames(table_unit_root_log_price_ratio) <- paste0(
+  "ADF(", c(0:6, 12, 24, 36), ")"  # FIXED: simplified
+)
+colnames(table_unit_root_log_price_ratio) <- c("Without Trend", "With Trend")
+table_unit_root_log_price_ratio
+
+
+# OLS---------------------------------------------------------------------------
+
+## log_exchange_rate ~ log_price_ratio: ch 9.5====
+
+ols1 <- lm(log_exchange_rate ~ log_price_ratio, data = df_clean)
+summary(ols1)  # ADDED: helpful to see results
+
+### ADF(cointegration tests of residuals): ch 9.5
+
+DF   <- ur.df(ols1$residuals, lag = 0, type = "none")@testreg$coef[1, 3]
+ADF1 <- ur.df(ols1$residuals, lag = 1, type = "none")@testreg$coef[1, 3]
+ADF2 <- ur.df(ols1$residuals, lag = 2, type = "none")@testreg$coef[1, 3]
+ADF3 <- ur.df(ols1$residuals, lag = 3, type = "none")@testreg$coef[1, 3]
+ADF4 <- ur.df(ols1$residuals, lag = 4, type = "none")@testreg$coef[1, 3]
+ADF5 <- ur.df(ols1$residuals, lag = 5, type = "none")@testreg$coef[1, 3]
+ADF6 <- ur.df(ols1$residuals, lag = 6, type = "none")@testreg$coef[1, 3]
+
+ttest1 <- cbind(DF, ADF1, ADF2, ADF3, ADF4, ADF5, ADF6)
+ttest1
+
+
+### log_exchange_rate  ~ log_cpi_pt + log_cpi_uk: ch 9.7
+
+ols2 <- lm(log_exchange_rate  ~ log_cpi_pt + log_cpi_uk,  data = df_clean)
+summary(ols2)  # ADDED: helpful to see results
+
+### ADF(cointegration tests of residuals): ch 9.8
+DF   <- ur.df(ols2$residuals, lag = 0, type = "none")@testreg$coef[1, 3]
+ADF1 <- ur.df(ols2$residuals, lag = 1, type = "none")@testreg$coef[1, 3]
+ADF2 <- ur.df(ols2$residuals, lag = 2, type = "none")@testreg$coef[1, 3]
+ADF3 <- ur.df(ols2$residuals, lag = 3, type = "none")@testreg$coef[1, 3]
+ADF4 <- ur.df(ols2$residuals, lag = 4, type = "none")@testreg$coef[1, 3]
+ADF5 <- ur.df(ols2$residuals, lag = 5, type = "none")@testreg$coef[1, 3]
+ADF6 <- ur.df(ols2$residuals, lag = 6, type = "none")@testreg$coef[1, 3]
+
+ttest2 <- cbind(DF, ADF1, ADF2, ADF3, ADF4, ADF5, ADF6)
+ttest2
+
+# 4. Johansen's Procedure----------------------------------------------------------
+
+data_johansen <- cbind(
+  s = df_clean$log_exchange_rate, 
+  p = df_clean$log_cpi_pt,      
+  pstar = df_clean$log_cpi_uk 
+)
+
+johansen_3 <- ca.jo(data_johansen, type = "eigen", ecdet ="const", K = 3)  
+summary(johansen_3)
+
+johansen_13 <- ca.jo(data_johansen, type = "eigen", ecdet = "const", K = 13) 
+summary(johansen_13)
+
+# 5. Additional (beyond Verbeek)---------------------------------------------------
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+## 5.1 Structural Break Detection (Chow Test): Brexit========
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+# 1. Verify if break date exists in the data data
+break_date <- ymd("2016-06-23") # Brexit vote
+cat("Break date exists:", break_date %in% df_clean$date, "\n")
+
+# 2. Find closest date if exact match not found
+if(!break_date %in% df_clean$date) {
+  closest_date <- df_clean$date[which.min(abs(df_clean$date - break_date))]
+  cat("Using closest date:", as.character(closest_date), "\n")
+  break_point <- which(df_clean$date == closest_date)
+} else {
+  break_point <- which(df_clean$date == break_date)
+}
+
+# 3. Run Chow test
+sctest(log_exchange_rate ~ log_price_ratio, 
+       type = "Chow", 
+       point = break_point,
+       data = df_clean)
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+## 5.2 Post-Chow Test (Structural Break at Brexit)====
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+# 1. Create Brexit Dummy and Split Data
+
+df_clean$post_brexit <- ifelse(df_clean$date >= ymd("2016-06-23"), 1, 0)
+pre_brexit <- df_clean %>% filter(post_brexit == 0)
+post_brexit <- df_clean %>% filter(post_brexit == 1)
+
+# 2. Sub-sample Unit Root Tests
+
+# Pre-Brexit tests
+
+summary(ur.df(pre_brexit$log_real_exchange_rate, type = "drift", lags = 12))
+summary(ur.df(pre_brexit$log_price_ratio, type = "drift", lags = 12))
+
+# Post-Brexit tests
+
+summary(ur.df(post_brexit$log_real_exchange_rate, type = "drift", lags = 4))
+summary(ur.df(post_brexit$log_price_ratio, type = "drift", lags = 4))
+
+# 3. Long-run PPP by Sub-period 
+
+# Pre-Brexit PPP relationship
+ols_pre <- lm(log_exchange_rate ~ log_price_ratio, data = pre_brexit)
+summary(ols_pre)
+
+# Post-Brexit PPP relationship
+ols_post <- lm(log_exchange_rate ~ log_price_ratio, data = post_brexit)
+
+summary(ols_post)
+
+# 4. Cointegration Tests by Period 
+# Pre-Brexit cointegration test
+resid_pre <- residuals(ols_pre)
+
+summary(ur.df(resid_pre, type = "none", lags = 12))
+
+# Post-Brexit cointegration test
+
+resid_post <- residuals(ols_post)
+summary(ur.df(resid_post, type = "none", lags = 4))
+
+# 5. ECM with Brexit Interaction
+# Prepare ECM variables
+df_clean_ecm <- df_clean %>%
+  mutate(
+    d_exchange = c(NA, diff(log_exchange_rate)),
+    d_ratio = c(NA, diff(log_price_ratio)),
+    ect_lag = lag(ols1$residuals)  # From original full-sample regression
+  ) %>%
+  na.omit()
+
+# ECM with structural break effects
+ecm_break <- lm(d_exchange ~ ect_lag + 
+                  ect_lag:post_brexit +   # Adjustment speed interaction
+                  d_ratio +               # Short-run price effect
+                  post_brexit,            # Brexit intercept shift
+                data = df_clean_ecm)
+
+summary(ecm_break)
+
+# 6. Johansen Test with Brexit Dummy 
+# Create a matrix without the dummy for the main variables
+data_main <- cbind(
+  s = df_clean$log_exchange_rate,
+  p = df_clean$log_cpi_pt,
+  pstar = df_clean$log_cpi_uk
+)
+
+# Create dummy matrix separately
+dummy_mat <- matrix(df_clean$post_brexit, ncol = 1)
+colnames(dummy_mat) <- "brexit"
+
+# Run Johansen with dummy variable
+johansen_break <- ca.jo(data_main, 
+                        type = "eigen", 
+                        ecdet = "const",
+                        dumvar = dummy_mat,
+                        K = 8)
+
+summary(johansen_break)
+
+# 7. Formal Coefficient Stability Test
+# Wald test for parameter constancy
+
+linearHypothesis(ols1, "log_price_ratio", vcov = vcovHC(ols1, type = "HC3"))
+
+
